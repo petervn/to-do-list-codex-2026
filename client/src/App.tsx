@@ -1,14 +1,31 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useOptimistic, useState, useTransition } from 'react';
 import type { Todo } from './types';
 import { TodoForm } from './components/TodoForm';
 import { TodoList } from './components/TodoList';
 import { createTodo, deleteTodo, fetchTodos, toggleTodo } from './api';
 
+type OptimisticAction =
+  | { type: 'add'; todo: Todo }
+  | { type: 'toggle'; id: string }
+  | { type: 'delete'; id: string };
+
+function todosReducer(state: Todo[], action: OptimisticAction): Todo[] {
+  switch (action.type) {
+    case 'add':
+      return [action.todo, ...state];
+    case 'delete':
+      return state.filter((t) => t.id !== action.id);
+    case 'toggle':
+      return state.map((t) => (t.id === action.id ? { ...t, completed: !t.completed } : t));
+  }
+}
+
 export default function App() {
   const [todos, setTodos] = useState<Todo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [processing, setProcessing] = useState<Set<string>>(new Set());
+  const [isPending, startTransition] = useTransition();
+  const [optimisticTodos, updateOptimisticTodos] = useOptimistic(todos, todosReducer);
 
   useEffect(() => {
     fetchTodos()
@@ -17,52 +34,49 @@ export default function App() {
       .finally(() => setLoading(false));
   }, []);
 
-  const handleAdd = async (title: string) => {
-    const newTodo = await createTodo(title);
-    setTodos((prev) => [newTodo, ...prev]);
+  const handleAdd = (title: string) => {
+    const tempTodo: Todo = {
+      id: `temp-${Date.now()}`,
+      title,
+      completed: false,
+      createdAt: new Date().toISOString(),
+    };
+    startTransition(async () => {
+      updateOptimisticTodos({ type: 'add', todo: tempTodo });
+      const newTodo = await createTodo(title);
+      setTodos((prev) => [newTodo, ...prev]);
+    });
   };
 
-  const handleToggle = async (id: string) => {
-    setProcessing((prev) => new Set(prev).add(id));
-    try {
+  const handleToggle = (id: string) => {
+    startTransition(async () => {
+      updateOptimisticTodos({ type: 'toggle', id });
       const updated = await toggleTodo(id);
-      setTodos((prev) => prev.map((todo) => (todo.id === id ? updated : todo)));
-    } finally {
-      setProcessing((prev) => {
-        const next = new Set(prev);
-        next.delete(id);
-        return next;
-      });
-    }
+      setTodos((prev) => prev.map((t) => (t.id === id ? updated : t)));
+    });
   };
 
-  const handleDelete = async (id: string) => {
-    setProcessing((prev) => new Set(prev).add(id));
-    try {
+  const handleDelete = (id: string) => {
+    startTransition(async () => {
+      updateOptimisticTodos({ type: 'delete', id });
       await deleteTodo(id);
-      setTodos((prev) => prev.filter((todo) => todo.id !== id));
-    } finally {
-      setProcessing((prev) => {
-        const next = new Set(prev);
-        next.delete(id);
-        return next;
-      });
-    }
+      setTodos((prev) => prev.filter((t) => t.id !== id));
+    });
   };
 
   const completedCount = useMemo(
-    () => todos.filter((todo) => todo.completed).length,
-    [todos]
+    () => optimisticTodos.filter((t) => t.completed).length,
+    [optimisticTodos]
   );
 
   return (
     <div className="app-container">
       <h1>My To-Do List</h1>
       <p style={{ textAlign: 'center', color: '#475569', marginTop: '-0.5rem' }}>
-        {completedCount} completed • {todos.length} total
+        {completedCount} completed • {optimisticTodos.length} total
       </p>
 
-      <TodoForm onSubmit={handleAdd} />
+      <TodoForm onAdd={handleAdd} />
 
       {error && (
         <div style={{ background: '#fee2e2', color: '#b91c1c', padding: '0.75rem', borderRadius: '8px' }}>
@@ -74,10 +88,10 @@ export default function App() {
         <p style={{ textAlign: 'center', color: '#64748b' }}>Loading…</p>
       ) : (
         <TodoList
-          todos={todos}
+          todos={optimisticTodos}
           onToggle={handleToggle}
           onDelete={handleDelete}
-          loadingIds={processing}
+          isPending={isPending}
         />
       )}
     </div>
